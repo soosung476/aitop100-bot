@@ -5,13 +5,16 @@ import ast
 import csv
 import json
 import operator
-from datetime import date, datetime
+import os
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import action_api
 import memory
 
-DATA_DIR = Path(__file__).parent / "data"
+# 자료 폴더: 기본은 data, 연습용 다른 자료로 시험할 때는 BOT_DATA_DIR 환경변수로 바꾼다
+DATA_DIR = Path(__file__).parent / os.getenv("BOT_DATA_DIR", "data")
 WEEKDAYS = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
 MAX_ROWS = 50  # 표 검색 결과를 한 번에 최대 몇 행까지 돌려줄지
 
@@ -59,6 +62,9 @@ def search_table(args, user_key):
         rows = [r for r in rows if keyword in str(r.get(column, ""))]
     elif keyword:
         rows = [r for r in rows if any(keyword in str(v) for v in r.values())]
+    # 검색어와 정확히 같은 값이 있는 행을 맨 앞으로 (예: '밤'으로 찾으면 '고구마(밤)'보다 '밤'이 먼저)
+    if keyword:
+        rows = sorted(rows, key=lambda r: keyword not in [str(v) for v in r.values()])
 
     result = {"표": name, "찾은 행 수": len(rows), "행": rows[:MAX_ROWS]}
     if len(rows) > MAX_ROWS:
@@ -103,15 +109,31 @@ def date_info(args, user_key):
         target = date.fromisoformat(str(args.get("date", "")).strip())
         base_text = str(args.get("base_date", "")).strip()
         base = date.fromisoformat(base_text) if base_text else today()
+        end_text = str(args.get("end_date", "")).strip()
+        end = date.fromisoformat(end_text) if end_text else None
     except ValueError:
         return {"오류": "날짜는 YYYY-MM-DD 형식으로 주세요."}
-    return {
+
+    result = {
         "날짜": target.isoformat(),
         "요일": WEEKDAYS[target.weekday()],
         "기준일": base.isoformat(),
         "기준일 요일": WEEKDAYS[base.weekday()],
         "기준일로부터 며칠 뒤": (target - base).days,
     }
+    # end_date를 주면 date부터 end_date까지 날짜마다 요일을 보여 준다 (가장 가까운 가능한 날을 찾을 때 쓴다)
+    if end:
+        if not 0 <= (end - target).days <= 31:
+            return {"오류": "end_date는 date와 같거나 뒤여야 하고, 기간은 31일 이내여야 합니다."}
+        result["기간"] = [
+            {
+                "날짜": (target + timedelta(days=i)).isoformat(),
+                "요일": WEEKDAYS[(target + timedelta(days=i)).weekday()],
+                "기준일로부터 며칠 뒤": (target + timedelta(days=i) - base).days,
+            }
+            for i in range((end - target).days + 1)
+        ]
+    return result
 
 
 def save_record(args, user_key):
@@ -128,10 +150,16 @@ def get_records(args, user_key):
     return {"기록": memory.list_records(user_key, kind)}
 
 
+def call_action_api(args, user_key):
+    return action_api.call(
+        args.get("method", "GET"), args.get("path", ""), user_key, args.get("query"), args.get("body")
+    )
+
+
 # ── LLM에게 보여 주는 도구 설명 ───────────────────────
 # description을 구체적으로 쓸수록 LLM이 도구를 알맞게 고른다
 
-TOOLS = [
+ALL_TOOLS = [
     {
         "type": "function",
         "function": {
@@ -166,12 +194,16 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "date_info",
-            "description": "날짜의 요일과, 기준일로부터 며칠 뒤인지 알려 준다. 날짜·요일은 추측하지 말고 이 도구로 확인한다.",
+            "description": (
+                "날짜의 요일과, 기준일로부터 며칠 뒤인지 알려 준다. 날짜·요일은 추측하지 말고 이 도구로 확인한다. "
+                "end_date를 주면 date부터 end_date까지 날짜마다 요일을 함께 보여 준다."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "date": {"type": "string", "description": "확인할 날짜 (YYYY-MM-DD)"},
                     "base_date": {"type": "string", "description": "기준일 (YYYY-MM-DD). 비우면 오늘"},
+                    "end_date": {"type": "string", "description": "기간의 마지막 날 (YYYY-MM-DD, 선택, 31일 이내)"},
                 },
                 "required": ["date"],
             },
@@ -205,6 +237,26 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "call_action_api",
+            "description": (
+                "운영진 액션 서버(API)를 부른다. 쓸 수 있는 주소와 형식은 참고 자료의 API 문서를 따른다. "
+                "인증 정보는 자동으로 붙는다. 결과의 상태코드가 400 이상이면 거절된 것이니 응답 내용을 읽고 대처한다."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
+                    "path": {"type": "string", "description": "주소 경로 (예: /products)"},
+                    "query": {"type": "object", "description": "주소 뒤에 붙는 조건 (예: {\"keyword\": \"사과\"})"},
+                    "body": {"type": "object", "description": "POST·PUT·PATCH로 보낼 JSON 본문"},
+                },
+                "required": ["method", "path"],
+            },
+        },
+    },
 ]
 
 # 도구 이름 → 실제로 실행할 함수
@@ -214,14 +266,27 @@ FUNCTIONS = {
     "date_info": date_info,
     "save_record": save_record,
     "get_records": get_records,
+    "call_action_api": call_action_api,
 }
+
+# 상황에 맞는 도구만 LLM에게 보여 준다
+# - 표 자료(CSV)가 없으면 search_table을 뺀다
+# - 액션 서버를 쓰면 주문의 진짜 저장소는 액션 서버이므로 로컬 기록 도구(save_record, get_records)를 뺀다
+ACTIVE = set(FUNCTIONS)
+if not TABLES:
+    ACTIVE.discard("search_table")
+if action_api.enabled():
+    ACTIVE -= {"save_record", "get_records"}
+else:
+    ACTIVE.discard("call_action_api")
+TOOLS = [tool for tool in ALL_TOOLS if tool["function"]["name"] in ACTIVE]
 
 
 def run_tool(name, arguments, user_key):
     # LLM이 요청한 도구를 실행하고 결과를 JSON 글자로 돌려준다
     # 실패해도 에러를 결과로 돌려줘서 LLM이 스스로 고쳐 다시 시도할 수 있게 한다
-    if name not in FUNCTIONS:
-        result = {"오류": f"'{name}' 도구는 없습니다.", "있는 도구": list(FUNCTIONS)}
+    if name not in ACTIVE:
+        result = {"오류": f"'{name}' 도구는 없습니다.", "있는 도구": sorted(ACTIVE)}
     else:
         try:
             args = json.loads(arguments or "{}")

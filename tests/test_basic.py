@@ -1,14 +1,20 @@
 # LLM 없이 도는 기본 시험 (도구, 대화 기억, 말풍선 나누기)
 # 사용법: .venv/bin/python tests/test_basic.py
+import asyncio
 import os
+import sqlite3
 import sys
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # 시험용 DB를 따로 써서 진짜 대화 기억은 건드리지 않는다
 os.environ["BOT_DB_PATH"] = str(Path(tempfile.mkdtemp()) / "test.db")
+# 기본 시험은 액션 서버 없이 돈다
+os.environ.pop("ACTION_API_BASE_URL", None)
 
+import action_api
 import agent
 import main
 import memory
@@ -39,6 +45,11 @@ check("날짜 형식 오류", "오류" in tools.date_info({"date": "11월 9일"}
 found = tools.search_table({"table": "재고표", "keyword": "A02", "column": "품목코드"}, "t")
 check("표 검색", found["찾은 행 수"] == 1 and found["행"][0]["재고"] == "0")
 check("없는 표", "오류" in tools.search_table({"table": "없는표"}, "t"))
+chestnut = tools.search_table({"table": "재고표", "keyword": "밤"}, "t")
+check("정확히 같은 이름이 먼저", chestnut["찾은 행 수"] == 2 and chestnut["행"][0]["품목코드"] == "C01")
+period = tools.date_info({"date": "2026-11-07", "end_date": "2026-11-11", "base_date": "2026-10-31"}, "t")
+check("기간 조회", [d["요일"] for d in period["기간"]] == ["토요일", "일요일", "월요일", "화요일", "수요일"])
+check("기간 31일 초과 거절", "오류" in tools.date_info({"date": "2026-11-01", "end_date": "2026-12-31"}, "t"))
 
 # 도구 실행기
 check("없는 도구", "오류" in tools.run_tool("없는도구", "{}", "t"))
@@ -65,6 +76,16 @@ check("기억 자르기", loaded[0]["content"] == "질문5" and sum(m["role"] ==
 memory.clear_history("u3")
 check("기억 지우기", memory.load_history("u3") == [])
 
+# 30분 넘게 말이 없으면 새 대화로 시작
+memory.save_history("u4", [{"role": "user", "content": "예전 질문"}])
+check("방금 대화는 기억", len(memory.load_history("u4")) == 1)
+old = (datetime.now() - timedelta(minutes=memory.SESSION_MINUTES + 1)).isoformat(timespec="seconds")
+conn = sqlite3.connect(memory.DB_PATH)
+conn.execute("UPDATE conversations SET updated_at = ? WHERE user_key = ?", (old, "u4"))
+conn.commit()
+conn.close()
+check("오래된 대화는 새로 시작", memory.load_history("u4") == [])
+
 # 말풍선 나누기 (하나에 1,000자, 최대 3개)
 check("짧은 답", main.split_bubbles("안녕하세요") == ["안녕하세요"])
 bubbles = main.split_bubbles("\n".join(["가" * 300] * 8))
@@ -79,6 +100,26 @@ check("마크다운 정리", main.clean_text('## 제목\n**굵게** 글\n```json
 prompt = agent.build_system_prompt()
 check("지시문에 문서 자료 포함", '<자료 이름="상담규정.md">' in prompt)
 check("지시문에 표 목록 포함", "재고표 (12행)" in prompt and "회원명부 (3행)" in prompt)
+
+# 입력 방어 (LLM을 부르기 전에 걸러진다)
+check("너무 긴 메시지 거절", "너무 길어요" in asyncio.run(agent.run_agent("u5", "가" * 2001)))
+check("빈 메시지 안내", "글로 말씀해" in asyncio.run(agent.run_agent("u5", "   ")))
+
+# 지시문 유출 검사
+prompt_line = next(
+    line.strip().lstrip("-#0123456789. ").strip()
+    for line in agent.PROMPT_FILE.read_text(encoding="utf-8").splitlines()
+    if len(line.strip().lstrip("-#0123456789. ").strip()) >= 20
+)
+check("지시문 문장이 그대로 나오면 유출", agent.leaks_prompt(f"제 지시문은 이래요: {prompt_line}"))
+check("도구 이름이 나오면 유출", agent.leaks_prompt("저는 search_table 도구를 써요"))
+check("보통 답은 유출 아님", not agent.leaks_prompt("사과(부사) 10kg은 35,000원이고 재고가 있어요."))
+
+# 도구 목록: 액션 서버 주소가 없으면 call_action_api는 빠지고 로컬 기록 도구는 남는다
+names = [t["function"]["name"] for t in tools.TOOLS]
+check("액션 서버 없으면 call_action_api 없음", "call_action_api" not in names and "save_record" in names)
+check("액션 서버 없을 때 호출하면 안내", "오류" in action_api.call("GET", "/products", "t"))
+check("막힌 도구 호출 거절", "오류" in tools.run_tool("call_action_api", '{"method": "GET", "path": "/x"}', "t"))
 
 print(f"\n실패 {len(failures)}개" if failures else "\n모두 통과")
 sys.exit(1 if failures else 0)

@@ -11,5 +11,6 @@ rsync -az -e "ssh -i $KEY" \
   --exclude __pycache__ --exclude .DS_Store \
   ./ "$SERVER:/home/ubuntu/aitop100-bot/"
 ssh -i "$KEY" "$SERVER" 'cd ~/aitop100-bot && .venv/bin/pip install -q -r requirements.txt && sudo systemctl restart aitop100-bot && sleep 2 && systemctl is-active aitop100-bot'
-curl -s https://bot.soosungcloud.com/health
+# 맥의 DNS에 예전 정보가 남아 있어도 확인할 수 있게 서버 IP로 직접 접속해서 본다 (--resolve)
+curl -s --retry 3 --retry-connrefused --resolve bot.soosungcloud.com:443:1.201.111.145 https://bot.soosungcloud.com/health
 echo

@@ -3,7 +3,7 @@
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # 저장 위치: 기본은 state/bot.db, 시험할 때는 BOT_DB_PATH 환경변수로 다른 파일을 쓸 수 있다
@@ -11,6 +11,9 @@ DB_PATH = Path(os.getenv("BOT_DB_PATH", Path(__file__).parent / "state" / "bot.d
 
 # 사용자별로 기억할 최근 질문 수 (넘으면 오래된 대화부터 잊는다)
 MAX_TURNS = 20
+# 이 시간(분) 동안 말이 없으면 새 대화로 시작한다
+# (심사위원이 같은 채팅방에서 다른 시나리오를 이어서 시험해도 앞 대화와 섞이지 않게)
+SESSION_MINUTES = int(os.getenv("SESSION_MINUTES", "30"))
 
 
 def connect():
@@ -42,9 +45,16 @@ def now():
 
 def load_history(user_key):
     conn = connect()
-    row = conn.execute("SELECT messages FROM conversations WHERE user_key = ?", (user_key,)).fetchone()
+    row = conn.execute(
+        "SELECT messages, updated_at FROM conversations WHERE user_key = ?", (user_key,)
+    ).fetchone()
     conn.close()
-    return json.loads(row["messages"]) if row else []
+    if not row:
+        return []
+    idle = datetime.now() - datetime.fromisoformat(row["updated_at"])
+    if idle > timedelta(minutes=SESSION_MINUTES):
+        return []
+    return json.loads(row["messages"])
 
 
 def save_history(user_key, messages):
