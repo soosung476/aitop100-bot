@@ -1,7 +1,10 @@
-# AITOP100 카카오톡 상담봇 (TOPTALK)
+# AITOP100 카카오톡 상담봇 (탑톡)
 
-카카오톡 채널 TOPTALK ↔ `https://bot.soosungcloud.com/webhook` (가비아 클라우드, FastAPI) ↔ Hive DeepSeek
-제출용 Kakao Developers App ID: **1620897** (TOPTALK)
+카카오톡 채널 「탑톡」 ↔ `https://bot.soosungcloud.com/webhook` (가비아 클라우드, FastAPI) ↔ Hive DeepSeek
+제출용 Kakao Developers App ID: **1620980** (앱·봇 이름 탑톡, 검색용 ID `toptalk2026`, 채널 검색 허용 꺼짐)
+채널 채팅: http://pf.kakao.com/_hJzWX/chat
+
+이전에 연습용으로 쓴 「TOPTALK」 앱(1620897)은 웹훅을 지워서 서버와 연결돼 있지 않다. 제출할 때 헷갈리지 않는다.
 
 ## 파일 구조
 
