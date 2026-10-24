@@ -1,0 +1,7 @@
+# 비밀 값(토큰, API 키)은 절대 올리지 않는다
+.env
+# 서버에서 만들어지는 것들
+.venv/
+state/
+__pycache__/
+.DS_Store
