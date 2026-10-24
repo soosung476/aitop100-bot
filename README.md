@@ -19,7 +19,10 @@
 | `memory.py` | 대화 기억·기록 저장 (SQLite, 서버 `state/bot.db`) | 안 고침 |
 | `main.py` | 카카오 웹훅 받기, 답장 보내기(말풍선 1,000자 × 최대 3개) | 인사말(`GREETING`)만 |
 | `examples/action_server/` | 연습용 가짜 액션 서버와 그 서버용 지시문·자료·정답 | 연습용 |
+| `prompts/템플릿.md` | 빈 지시문 틀 (보안 규칙은 완성돼 있음) | **복사해서 채운다** |
 | `docs/디브리프_초안.md` | 제출할 디브리프 초안 | **채운다** |
+| `docs/리허설.md` | 리허설 절차 (`scripts/rehearsal.sh on/off`) | 리허설용 |
+| `CLAUDE.md` | 이 폴더에서 Claude Code를 시작하면 자동으로 읽는 안내 | — |
 
 지금 `prompts/`와 `data/`에 들어 있는 것은 연습 문제 4번(두 마을 공동 주문 상담)이다.
 `data/재고표.csv`의 생굴 비고란에는 일부러 숨은 지시(간접 인젝션)를 넣어 두었다.
@@ -86,6 +89,8 @@ $RUN .venv/bin/python scripts/simulate.py --repeat 3 --cards-file tests/공격�
 ```
 
 ### 가짜 액션 서버로 연습
+
+리허설 때는 맥에서 `./scripts/rehearsal.sh on`(켜기) / `off`(끄기) / `status`(상태)를 쓴다. 가짜 서버와 `.env`의 액션 서버 줄을 한 번에 켜고 끈다. 자세한 순서는 `docs/리허설.md`에 있다. 아래는 손으로 할 때의 명령어다.
 
 ```bash
 # 가짜 서버 켜기 (서버 안에서만 접속 가능한 127.0.0.1:9000)
