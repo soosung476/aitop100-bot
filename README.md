@@ -100,6 +100,9 @@ sudo systemd-run --quiet --unit=aitop100-mock --collect -p User=ubuntu -p Workin
 MOCK="-p Environment=BOT_PROMPT_FILE=examples/action_server/system.md -p Environment=BOT_DATA_DIR=examples/action_server/data -p Environment=ACTION_API_BASE_URL=http://127.0.0.1:9000 -p Environment=ACTION_API_HEADER_NAME=X-API-Key -p Environment=ACTION_API_HEADER_VALUE=practice-key -p Environment=ACTION_API_USER_HEADER=X-User-Key"
 $RUN $MOCK .venv/bin/python scripts/simulate.py --repeat 3 --expected examples/action_server/정답.json
 
+# 동시 접속 시험 (1·6·12·24·48명이 한꺼번에 메시지를 하나씩 보낼 때 걸린 시간, 429 횟수를 한 줄씩 보여 준다)
+$RUN $MOCK .venv/bin/python scripts/loadtest.py
+
 # 가짜 서버 끄기
 sudo systemctl stop aitop100-mock
 ```
