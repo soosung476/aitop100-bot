@@ -1,11 +1,15 @@
 # LLM 에이전트: 대화 기억을 불러와서, 필요한 만큼 도구를 부르며 답을 만든다
 import asyncio
+import json
 import logging
 import os
+import re
+import time
 from pathlib import Path
 
-from openai import AsyncOpenAI
+from openai import APIError, AsyncOpenAI
 
+import media
 import memory
 import tools
 
@@ -16,11 +20,15 @@ BASE_DIR = Path(__file__).parent
 PROMPT_FILE = BASE_DIR / os.getenv("BOT_PROMPT_FILE", "prompts/system.md")
 
 # LLM 설정: 서버 .env에서 읽는다 (Hive의 DeepSeek, OpenAI 방식과 호환)
-LLM_MODEL = os.getenv("LLM_MODEL", "")
-# 답 길이 상한: 작으면 생각하는 데 다 써 버려 답이 잘리거나 비어서 오므로 모델 최대치로 둔다
-LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "393216"))
+LLM_MODEL = os.getenv("LLM_MODEL", "").strip()
+# 앞의 모델이 오류를 내면 바로 넘어갈 예비 모델 (60초 안에 답하려고 같은 모델을 오래 재시도하지 않는다)
+LLM_FALLBACK_MODEL = os.getenv("LLM_FALLBACK_MODEL", "").strip()
+# 모델별 추가 설정(JSON). 예: {"reasoning_effort": "low"} (생각을 줄여 응답을 빠르게 한다)
+LLM_EXTRA_BODY = json.loads(os.getenv("LLM_EXTRA_BODY", "") or "{}")
+# 답 길이 상한: 작으면 생각하는 데 다 써 버려 답이 잘리거나 비어서 오므로 넉넉히 둔다
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "8000"))
 # 한 질문에서 도구를 연달아 부를 수 있는 최대 횟수 (무한 반복 방지)
-MAX_TOOL_ROUNDS = 10
+MAX_TOOL_ROUNDS = 8
 # 한 번에 받을 메시지 최대 길이 (아주 긴 글로 지시문을 덮어쓰려는 공격과 토큰 낭비를 막는다)
 MAX_INPUT_CHARS = 2000
 
@@ -31,31 +39,80 @@ MAX_INPUT_CHARS = 2000
 llm = AsyncOpenAI(
     base_url=os.getenv("LLM_BASE_URL"),
     api_key=os.getenv("LLM_API_KEY") or "missing-key",
-    timeout=120,
-    max_retries=6,
+    timeout=float(os.getenv("LLM_TIMEOUT", "22")),
+    max_retries=0,
 )
 
-# Hive는 같은 키로 동시에 5개까지만 받아 준다(넘으면 429). 동시에 부르는 수를 4개로 제한해서 줄을 세운다
+# 이 시간 안에 답이 없으면 같은 요청을 하나 더 보낸다
+HEDGE_SECONDS = float(os.getenv("LLM_HEDGE_SECONDS", "8"))
+
+# Hive는 같은 키로 동시에 5개까지만 받아 준다(넘으면 429). 동시에 부르는 수를 제한해서 줄을 세운다
 # Semaphore: 동시에 들어갈 수 있는 자리 수를 정해 두는 문지기. 자리가 없으면 빌 때까지 기다린다
-llm_slots = asyncio.Semaphore(int(os.getenv("LLM_CONCURRENCY", "4")))
+llm_slots = asyncio.Semaphore(int(os.getenv("LLM_CONCURRENCY", "3")))
+
+
+async def race_llm(**kwargs):
+    # 응답이 가끔 튀는(수십 초) 경우가 있어서, HEDGE_SECONDS 안에 답이 없으면 같은 요청을 하나 더 보내
+    # 먼저 도착한 답을 쓴다 (asyncio.wait: 정해 둔 시간까지 또는 하나가 끝날 때까지 기다린다)
+    tasks = {asyncio.create_task(llm.chat.completions.create(**kwargs))}
+    done, pending = await asyncio.wait(tasks, timeout=HEDGE_SECONDS)
+    if not done:
+        log.info("LLM 응답 지연 → 같은 요청을 하나 더 보냄")
+        pending.add(asyncio.create_task(llm.chat.completions.create(**kwargs)))
+    error = None
+    while True:
+        for task in done:
+            if task.exception() is None:
+                for other in pending:
+                    other.cancel()
+                return task.result()
+            error = task.exception()
+        if not pending:
+            raise error
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
 
 
 async def ask_llm(**kwargs):
     async with llm_slots:
-        return await llm.chat.completions.create(**kwargs)
+        try:
+            return await race_llm(**kwargs)
+        except APIError as e:
+            if not LLM_FALLBACK_MODEL or kwargs.get("model") == LLM_FALLBACK_MODEL:
+                raise
+            log.warning("모델 오류 → 예비 모델로 전환: %s", e.__class__.__name__)
+            kwargs["model"] = LLM_FALLBACK_MODEL
+            return await llm.chat.completions.create(**kwargs)
 
 # 이 말을 보내면 대화 기억을 지우고 처음부터 시작한다 (시험할 때 편하다)
 RESET_COMMANDS = {"/초기화", "/reset"}
 # 지시문이 새어 나가려 할 때 대신 보내는 답
-SAFE_ANSWER = "죄송하지만 그 내용은 안내해 드릴 수 없어요. 주문 상담에 필요한 내용을 말씀해 주세요."
+SAFE_ANSWER = "죄송하지만 그 내용은 안내해 드릴 수 없어요. 상담에 필요한 내용을 말씀해 주세요."
+
+# 대화에서 케이스 ID(TC ID)를 찾는다
+# ① "- id: L-11"처럼 이름표가 붙은 줄 ② 이름표 없이 L-03, R-05-a 모양으로 쓴 값
+CASE_ID_PATTERNS = [
+    re.compile(r"(?im)^[\s\-\[]*(?:tc[\s_-]*id|test[\s_-]*case[\s_-]*id|x-aitop100-test-case-id|tc|id)\s*[:=]\s*([A-Za-z0-9][A-Za-z0-9_-]{1,30})"),
+    re.compile(r"(?<![A-Za-z0-9-])([A-Z]{1,2}-\d{2,3}(?:-[a-z])?)(?![A-Za-z0-9-])"),
+]
+
+
+def find_case_id(text):
+    for pattern in CASE_ID_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return ""
 
 
 def build_system_prompt():
-    # 지시문 파일(역할·규칙) + 오늘 날짜 + 자료 폴더의 문서(.md, .txt) + 표 목록을 하나로 합친다
+    # 지시문 파일(역할·규칙) + 기준 날짜 + 자료 폴더의 문서(.md, .txt) + 표 목록을 하나로 합친다
     prompt = PROMPT_FILE.read_text(encoding="utf-8")
 
     now = tools.today()
-    prompt += f"\n\n# 오늘\n오늘은 {now.isoformat()} ({tools.WEEKDAYS[now.weekday()]})이다. 자료에 기준일이 따로 있으면 그 기준일을 따른다."
+    prompt += (
+        f"\n\n# 기준 날짜\n세계관의 현재는 {now.isoformat()} ({tools.WEEKDAYS[now.weekday()]})이다. "
+        "대화 첫머리에 상담 인입 일시가 있으면 그 일시를 오늘로 삼아 판단한다."
+    )
 
     documents = []
     for path in sorted(tools.DATA_DIR.glob("*")):
@@ -88,22 +145,35 @@ async def run_agent(user_key, text):
         memory.clear_history(user_key)
         return "대화를 처음부터 다시 시작할게요. 무엇을 도와드릴까요?"
     if not text:
-        return "글로 말씀해 주세요. 이모티콘이나 사진은 아직 이해하지 못해요."
+        return "글로 말씀해 주세요."
     if len(text) > MAX_INPUT_CHARS:
         return f"메시지가 너무 길어요. {MAX_INPUT_CHARS:,}자 이내로 나눠서 보내 주세요."
+
+    # 케이스 ID가 바뀌면 다른 시나리오이므로 앞 대화를 지우고 새로 시작한다
+    # 첫 메시지에는 "case metadata"가 붙어 오므로, 같은 케이스를 다시 시험해도 새 대화로 시작한다
+    case_id = find_case_id(text)
+    if case_id and (case_id != memory.get_case(user_key) or "case metadata" in text.lower()):
+        memory.clear_history(user_key)
+        memory.set_case(user_key, case_id)
+        log.info("새 케이스 %s user=%s", case_id, user_key[-12:])
+
+    text = await media.expand_media(text, ask_llm, LLM_MODEL)
 
     history = memory.load_history(user_key)
     history.append({"role": "user", "content": text})
     system = {"role": "system", "content": build_system_prompt()}
 
-    for _ in range(MAX_TOOL_ROUNDS):
+    for round_no in range(MAX_TOOL_ROUNDS):
+        started = time.time()
         response = await ask_llm(
             model=LLM_MODEL,
             messages=[system] + history,
             tools=tools.TOOLS,
             max_tokens=LLM_MAX_TOKENS,
+            **({"extra_body": LLM_EXTRA_BODY} if LLM_EXTRA_BODY else {}),
         )
         message = response.choices[0].message
+        log.info("LLM %d회차 %.1f초 %s", round_no + 1, time.time() - started, response.usage)
 
         # ① 도구를 부르라는 답이면: 도구를 실행하고 결과를 대화에 붙인 뒤 다시 LLM에게 묻는다
         if message.tool_calls:
@@ -119,12 +189,13 @@ async def run_agent(user_key, text):
                     for call in message.tool_calls
                 ],
             })
-            for call in message.tool_calls:
-                # 도구는 액션 서버를 부르느라 몇 초 걸릴 수 있다 → 별도 스레드(asyncio.to_thread)에서 실행해서
-                # 그동안 다른 사용자의 웹훅 응답(1초 제한)이 막히지 않게 한다
-                result = await asyncio.to_thread(
-                    tools.run_tool, call.function.name, call.function.arguments, user_key
-                )
+            # 도구는 액션 서버를 부르느라 시간이 걸린다 → 별도 스레드에서 실행해서 웹훅 응답(1초 제한)이 막히지 않게 하고,
+            # 한 번에 여러 개를 요청받으면 동시에 실행해서 기다리는 시간을 줄인다 (gather: 전부 끝나면 순서대로 결과를 준다)
+            results = await asyncio.gather(*[
+                asyncio.to_thread(tools.run_tool, call.function.name, call.function.arguments, user_key)
+                for call in message.tool_calls
+            ])
+            for call, result in zip(message.tool_calls, results):
                 log.info("도구 %s %s → %s", call.function.name, call.function.arguments[:200], result[:200])
                 history.append({"role": "tool", "tool_call_id": call.id, "content": result})
             continue

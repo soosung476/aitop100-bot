@@ -26,6 +26,13 @@ def connect():
                messages   TEXT NOT NULL,
                updated_at TEXT NOT NULL)"""
     )
+    # 지금 처리 중인 케이스 ID(TC ID): 액션 API 헤더에 넣고, 바뀌면 새 대화로 시작한다
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS cases (
+               user_key   TEXT PRIMARY KEY,
+               case_id    TEXT NOT NULL,
+               updated_at TEXT NOT NULL)"""
+    )
     conn.execute(
         """CREATE TABLE IF NOT EXISTS records (
                id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,6 +77,7 @@ def save_history(user_key, messages):
 def clear_history(user_key):
     conn = connect()
     conn.execute("DELETE FROM conversations WHERE user_key = ?", (user_key,))
+    conn.execute("DELETE FROM cases WHERE user_key = ?", (user_key,))
     conn.commit()
     conn.close()
 
@@ -81,6 +89,25 @@ def trim_history(messages):
     if len(user_positions) <= MAX_TURNS:
         return messages
     return messages[user_positions[-MAX_TURNS]:]
+
+
+# ── 케이스 ID ─────────────────────────────────────────
+
+def get_case(user_key):
+    conn = connect()
+    row = conn.execute("SELECT case_id FROM cases WHERE user_key = ?", (user_key,)).fetchone()
+    conn.close()
+    return row["case_id"] if row else ""
+
+
+def set_case(user_key, case_id):
+    conn = connect()
+    conn.execute(
+        "INSERT OR REPLACE INTO cases (user_key, case_id, updated_at) VALUES (?, ?, ?)",
+        (user_key, case_id, now()),
+    )
+    conn.commit()
+    conn.close()
 
 
 # ── 기록 (주문서 등) ──────────────────────────────────

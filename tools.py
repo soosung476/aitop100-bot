@@ -6,9 +6,8 @@ import csv
 import json
 import operator
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import action_api
 import memory
@@ -45,7 +44,8 @@ def describe_tables():
 
 
 def today():
-    return datetime.now(ZoneInfo("Asia/Seoul")).date()
+    # 대회 세계관의 기준일 (현실 날짜가 아니다). 시나리오마다 상담 인입 일시가 따로 오면 그쪽이 우선이다
+    return date.fromisoformat(os.getenv("WORLD_TODAY", "2037-06-30"))
 
 
 # ── 도구 함수 ─────────────────────────────────────────
@@ -104,6 +104,41 @@ def calculate(args, user_key):
     return {"식": expression, "결과": result}
 
 
+# 영업일·출고 달력: reference/영업일달력.csv (2037년, 관리 이민준)
+CALENDAR = {}
+for row in csv.reader(open(Path(__file__).parent / "reference" / "영업일달력.csv", encoding="utf-8-sig")):
+    if len(row) >= 4 and row[0][:4].isdigit():
+        CALENDAR[row[0]] = (row[2], row[3])
+
+
+def day_info(day):
+    return CALENDAR.get(day.isoformat(), ("달력 범위 밖", "달력 범위 밖"))
+
+
+def is_business_day(day):
+    return day_info(day)[0].startswith("영업")
+
+
+def next_ship_day(day):
+    for i in range(0, 15):
+        candidate = day + timedelta(days=i)
+        if day_info(candidate)[1].startswith("출고일"):
+            return candidate
+    return day
+
+
+def add_business_days(base, count):
+    # 기준일이 휴무일이면 다음 영업일을 기준일로 바꾼다. 당일은 세지 않고 다음 영업일이 1일차다
+    while not is_business_day(base) and base.isoformat() in CALENDAR:
+        base += timedelta(days=1)
+    day = base
+    while count > 0:
+        day += timedelta(days=1)
+        if is_business_day(day):
+            count -= 1
+    return day
+
+
 def date_info(args, user_key):
     try:
         target = date.fromisoformat(str(args.get("date", "")).strip())
@@ -117,10 +152,18 @@ def date_info(args, user_key):
     result = {
         "날짜": target.isoformat(),
         "요일": WEEKDAYS[target.weekday()],
+        "영업 구분": day_info(target)[0],
+        "정기 출고": day_info(target)[1],
         "기준일": base.isoformat(),
         "기준일 요일": WEEKDAYS[base.weekday()],
         "기준일로부터 며칠 뒤": (target - base).days,
+        "date 이후 첫 출고일": next_ship_day(target).isoformat(),
     }
+    # 영업일 기한: 기준일 다음 영업일이 1일차, N일차 24:00이 기한이다 (이관 회신 기한 등)
+    business_days = args.get("business_days")
+    if business_days:
+        due = add_business_days(target, int(business_days))
+        result[f"date부터 영업일 {int(business_days)}일째(기한)"] = f"{due.isoformat()} ({WEEKDAYS[due.weekday()]}) 24:00"
     # end_date를 주면 date부터 end_date까지 날짜마다 요일을 보여 준다 (가장 가까운 가능한 날을 찾을 때 쓴다)
     if end:
         if not 0 <= (end - target).days <= 31:
@@ -152,7 +195,8 @@ def get_records(args, user_key):
 
 def call_action_api(args, user_key):
     return action_api.call(
-        args.get("method", "GET"), args.get("path", ""), user_key, args.get("query"), args.get("body")
+        args.get("method", "GET"), args.get("path", ""), user_key,
+        args.get("query"), args.get("body"), args.get("case_id", ""),
     )
 
 
@@ -195,8 +239,8 @@ ALL_TOOLS = [
         "function": {
             "name": "date_info",
             "description": (
-                "날짜의 요일과, 기준일로부터 며칠 뒤인지 알려 준다. 날짜·요일은 추측하지 말고 이 도구로 확인한다. "
-                "end_date를 주면 date부터 end_date까지 날짜마다 요일을 함께 보여 준다."
+                "날짜의 요일, 영업일 여부, 정기 출고일 여부, 다음 출고일, 기준일로부터 며칠 뒤인지 알려 준다. "
+                "business_days를 주면 date를 접수일로 삼아 영업일 N일째 기한을 계산한다(이관 회신 기한 등). 날짜 계산은 추측하지 말고 이 도구로 한다."
             ),
             "parameters": {
                 "type": "object",
@@ -204,6 +248,7 @@ ALL_TOOLS = [
                     "date": {"type": "string", "description": "확인할 날짜 (YYYY-MM-DD)"},
                     "base_date": {"type": "string", "description": "기준일 (YYYY-MM-DD). 비우면 오늘"},
                     "end_date": {"type": "string", "description": "기간의 마지막 날 (YYYY-MM-DD, 선택, 31일 이내)"},
+                    "business_days": {"type": "integer", "description": "date부터 셀 영업일 수 (선택, 예: 3)"},
                 },
                 "required": ["date"],
             },
@@ -242,16 +287,18 @@ ALL_TOOLS = [
         "function": {
             "name": "call_action_api",
             "description": (
-                "운영진 액션 서버(API)를 부른다. 쓸 수 있는 주소와 형식은 참고 자료의 API 문서를 따른다. "
-                "인증 정보는 자동으로 붙는다. 결과의 상태코드가 400 이상이면 거절된 것이니 응답 내용을 읽고 대처한다."
+                "주문·배송·결제·상품·프로모션·조합원 조회와 환불·변경·이관 접수를 하는 액션 API를 부른다. "
+                "쓸 수 있는 주소와 형식은 참고 자료의 API 문서를 따른다. 인증과 케이스 ID는 자동으로 붙는다. "
+                "여러 건을 조회할 때는 한 번에 함께 호출한다. 상태코드 404는 대상 없음, 400은 값이나 형식 오류다."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
-                    "path": {"type": "string", "description": "주소 경로 (예: /products)"},
-                    "query": {"type": "object", "description": "주소 뒤에 붙는 조건 (예: {\"keyword\": \"사과\"})"},
-                    "body": {"type": "object", "description": "POST·PUT·PATCH로 보낼 JSON 본문"},
+                    "method": {"type": "string", "enum": ["GET", "POST"]},
+                    "path": {"type": "string", "description": "주소 경로 (예: /api/orders/100200017)"},
+                    "query": {"type": "object", "description": "주소 뒤에 붙는 조건 (예: {\"order_no\": \"100200017\"})"},
+                    "body": {"type": "object", "description": "POST로 보낼 JSON 본문. 본문이 없는 접수 API는 생략한다"},
+                    "case_id": {"type": "string", "description": "대화에서 전달받은 케이스 ID. 대화 첫머리의 id 값"},
                 },
                 "required": ["method", "path"],
             },

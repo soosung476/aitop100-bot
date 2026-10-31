@@ -7,6 +7,7 @@ import httpx
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 
 import agent
+import media
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bot")
@@ -20,16 +21,23 @@ WEBHOOK_HEADER_VALUE = os.getenv("WEBHOOK_HEADER_VALUE", "")
 
 KAKAO_CALLBACK_URL = "https://kapi.kakao.com/v1/bot/callback"
 
-# 콜백 토큰은 5분 안에 써야 하므로, 에이전트는 4분 안에 끝내고 못 끝내면 안내 문구를 보낸다
-AGENT_TIMEOUT = 240
-# 카카오 말풍선 제한: 하나에 최대 1,000자, 한 번에 최대 3개
-BUBBLE_LIMIT = 1000
-MAX_BUBBLES = 3
+# 심사는 60초 동안 응답이 없으면 케이스를 끝낸다 → 50초 안에 못 끝내면 안내 문구를 보낸다
+AGENT_TIMEOUT = 50
+# 심사 기준: 말풍선 500자를 넘으면 평가에서 빠지고, 말풍선 수·글자 수는 적을수록 좋다
+BUBBLE_LIMIT = 480
+MAX_BUBBLES = 2
 
 # 봇이 채팅방에 초대됐을 때(ENTRANCE) 보내는 인사
-GREETING = "안녕하세요! 교동마을·갯마을 공동 주문 상담봇이에요. 주문하고 싶은 상품을 말씀해 주세요."
+GREETING = "안녕하세요, 교동마을 산지직송 상담 도우미예요. 무엇을 도와드릴까요?"
 
 app = FastAPI()
+
+
+# 받아쓰기 모델은 처음 읽을 때 10초가 걸리므로 서버가 켜질 때 미리 읽어 둔다
+@app.on_event("startup")
+async def preload_models():
+    asyncio.get_running_loop().run_in_executor(None, media.load_whisper)
+
 
 # 같은 사용자의 메시지는 한 번에 하나씩 처리한다 (연달아 보내도 대화 기억이 꼬이지 않게)
 user_locks = defaultdict(asyncio.Lock)
@@ -87,7 +95,7 @@ async def reply(callback_token: str, user_key: str, text: str):
         answer = await asyncio.wait_for(run_with_lock(user_key, text), timeout=AGENT_TIMEOUT)
     except asyncio.TimeoutError:
         log.error("에이전트 시간 초과 user=%s", user_key[-12:])
-        answer = "답변 준비가 너무 오래 걸렸어요. 잠시 후 다시 말씀해 주세요."
+        answer = "확인이 늦어지고 있어요. 죄송하지만 같은 내용을 한 번만 더 말씀해 주세요."
     except Exception as e:
         log.error("에이전트 실패: %s", e)
         answer = "지금 답변이 어려워요. 잠시 후 다시 시도해 주세요."
@@ -111,6 +119,9 @@ def split_bubbles(text):
     # 말풍선 하나에 BUBBLE_LIMIT자까지 담고, 넘치면 줄 단위로 나눈다
     bubbles = []
     current = ""
+    # 말풍선 하나로 들어가면 나누지 않는다 (말풍선 수가 적을수록 점수가 높다)
+    if len(text) <= BUBBLE_LIMIT:
+        return [text] if text.strip() else ["답변을 만들지 못했어요. 다시 한 번 말씀해 주세요."]
     for line in text.split("\n"):
         while len(line) > BUBBLE_LIMIT:  # 한 줄이 제한보다 길면 제한 길이로 자른다
             if current:
