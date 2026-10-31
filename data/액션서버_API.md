@@ -4,7 +4,7 @@
 
 ## 상품·로트·재고
 API-01 GET /api/products/{sku} 상품 조회 (price는 현재 판매가)
-API-02 GET /api/products?item=품목접두사 품목별 상품 검색 (WTM 수박, HGL 하우스감귤, MNG 애플망고, SWP 고구마, OKD 옥돔, GAL 갈치)
+API-02 GET /api/products?item=품목접두사 품목별 상품 검색 (WTM 수박, HGL 하우스감귤, NGL 노지감귤, MDR 만감류, MNG 애플망고, MLN 멜론, PTT 감자, SWP 고구마, KIW 참다래, SLC 절임배추, OKD 옥돔, GAL 갈치)
 API-03 GET /api/lots/{lot_id} 로트 조회 (packed_at, measured_weight_g, measured_brix, grade, status, sprayed_at)
 API-04 GET /api/lots/{lot_id}/investigation 로트 조사 조회 (없으면 404 = 조사 기록 없음)
 API-21 GET /api/inventory?sku= 재고 조회
