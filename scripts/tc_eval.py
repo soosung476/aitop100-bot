@@ -21,6 +21,9 @@ import memory
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 TC_DIR = BASE_DIR / "tests" / "public_tc"
+if "--synth" in sys.argv:  # 문서에서 만든 시험 시나리오로 돌릴 때
+    sys.argv.remove("--synth")
+    TC_DIR = BASE_DIR / "tests" / "synth"
 MAX_TURNS = 7
 RUN_STAMP = datetime.now().strftime("%m%d-%H%M%S")
 OUT_DIR = BASE_DIR / "state" / "tc_eval" / RUN_STAMP
