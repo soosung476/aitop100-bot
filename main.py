@@ -75,6 +75,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         user_key = f"{data.get('botGroupKey', '')}:{data.get('botUserKey', '')}"
         content = data.get("content", "")
         log.info("MESSAGE_CREATE user=%s content=%s", user_key[-12:], content[:100])
+        # 사진·음성이 어떤 모양으로 오는지 확인하려고 글자가 아닌 메시지는 필드 이름과 값을 남긴다
+        if not content.strip() or len(data) > 7:
+            log.info("비정형 메시지 %s", {k: str(v)[:200] for k, v in data.items() if k != "callbackToken"})
         background_tasks.add_task(reply, callback_token, user_key, content)
 
     elif event_type == "ENTRANCE" and callback_token:
