@@ -119,6 +119,43 @@ LABELED_ID_PATTERN = re.compile(
 BARE_ID_PATTERN = re.compile(r"(?<![A-Za-z0-9-])([A-Z]{1,2}-\d{2,3}(?:-[a-z])?)(?![A-Za-z0-9-])")
 
 
+# 상황별 처리 절차: 고객 말에 맞는 절차만 골라 답변 직전에 다시 보여 준다
+# 자료가 길어도 지금 필요한 절차를 빠뜨리지 않게 하는 장치다 (형식: "## 정규식" 다음 줄부터 절차)
+SITUATION_FILE = BASE_DIR / "prompts" / "상황규칙.md"
+MAX_SITUATIONS = 3
+
+
+def load_situations():
+    rules = []
+    for block in SITUATION_FILE.read_text(encoding="utf-8").split("\n## "):
+        head, _, body = block.lstrip("# ").partition("\n")
+        if head.strip() and body.strip():
+            rules.append((re.compile(head.strip()), body.strip()))
+    return rules
+
+
+SITUATIONS = load_situations()
+METADATA_BLOCK = re.compile(r"(?is)case metadata.*?인입 계정:[^\n]*")
+
+
+def situation_reminder(history):
+    # 지금까지 고객이 한 말에서 찾고, 최근 말에 걸린 절차를 앞에 둔다
+    # case metadata 줄("회원 로그인" 등)은 고객의 말이 아니므로 빼고 본다
+    said = [
+        METADATA_BLOCK.sub("", m["content"]) for m in history
+        if m["role"] == "user" and isinstance(m["content"], str)
+    ]
+    picked = []
+    for text in reversed(said):
+        for pattern, body in SITUATIONS:
+            if body not in picked and pattern.search(text):
+                picked.append(body)
+    if not picked:
+        return FORMAT_REMINDER
+    rules = "\n".join(picked[:MAX_SITUATIONS])
+    return {"role": "system", "content": f"이번 문의에 해당하는 절차:\n{rules}\n\n{FORMAT_REMINDER['content']}"}
+
+
 SHORTEN_OVER = int(os.getenv("SHORTEN_OVER", "300"))
 
 
@@ -225,7 +262,7 @@ async def run_agent(user_key, text):
         started = time.time()
         response = await ask_llm(
             model=LLM_MODEL,
-            messages=[system] + history + [FORMAT_REMINDER],
+            messages=[system] + history + [situation_reminder(history)],
             tools=tools.TOOLS,
             max_tokens=LLM_MAX_TOKENS,
             **({"extra_body": LLM_EXTRA_BODY} if LLM_EXTRA_BODY else {}),
