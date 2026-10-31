@@ -208,11 +208,21 @@ def get_records(args, user_key):
     return {"기록": memory.list_records(user_key, kind)}
 
 
+# 대화별 상담 인입 일자 (이관 회신 기한을 코드로 정확히 계산하려고 둔다)
+CASE_DATES = {}
+
+
 def call_action_api(args, user_key):
-    return action_api.call(
+    result = action_api.call(
         args.get("method", "GET"), args.get("path", ""), user_key,
         args.get("query"), args.get("body"), args.get("case_id", ""),
     )
+    # 이관을 접수하면 회신 기한(영업일 3일)을 결과에 붙여 준다. LLM이 날짜와 요일을 틀리지 않게 한다
+    if str(args.get("path", "")).rstrip("/").endswith("/api/escalations") and result.get("상태코드") in (200, 201):
+        base = date.fromisoformat(CASE_DATES.get(user_key, today().isoformat()))
+        due = add_business_days(base, 3)
+        result["회신 기한"] = f"{due.month}월 {due.day}일({WEEKDAYS[due.weekday()][0]}) 24:00까지"
+    return result
 
 
 # ── LLM에게 보여 주는 도구 설명 ───────────────────────
