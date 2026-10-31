@@ -119,6 +119,33 @@ LABELED_ID_PATTERN = re.compile(
 BARE_ID_PATTERN = re.compile(r"(?<![A-Za-z0-9-])([A-Z]{1,2}-\d{2,3}(?:-[a-z])?)(?![A-Za-z0-9-])")
 
 
+SHORTEN_OVER = int(os.getenv("SHORTEN_OVER", "300"))
+
+
+async def shorten(answer):
+    # 답이 너무 길면 뜻을 유지한 채 줄인다 (말풍선당 글자 수가 적을수록 점수가 높다)
+    if len(answer) <= SHORTEN_OVER:
+        return answer
+    started = time.time()
+    try:
+        response = await ask_llm(
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": (
+                "아래 고객 상담 답변을 250자 안팎, 한 문단으로 줄여라. 사과, 결론, 접수번호, 금액, 날짜, 기한, "
+                "규정 근거, 고객에게 묻는 질문, 다음 행동은 빠뜨리지 말고, 되풀이와 군더더기만 뺀다. 새 내용을 넣지 않는다. "
+                "줄인 글만 출력한다.\n\n" + answer
+            )}],
+            max_tokens=1500,
+            **({"extra_body": LLM_EXTRA_BODY} if LLM_EXTRA_BODY else {}),
+        )
+        short = (response.choices[0].message.content or "").strip()
+    except Exception as e:
+        log.warning("답변 줄이기 실패: %s", e.__class__.__name__)
+        return answer
+    log.info("답변 줄임 %d자 → %d자 (%.1f초)", len(answer), len(short), time.time() - started)
+    return short if 0 < len(short) < len(answer) else answer
+
+
 def find_case_id(text, current=""):
     if "case metadata" in text.lower() or "상담 인입" in text:
         match = METADATA_ID_PATTERN.search(text)
@@ -232,7 +259,7 @@ async def run_agent(user_key, text):
             continue
 
         # ② 최종 답이면: 지시문 유출을 검사하고, 대화 기억에 저장한 뒤 돌려준다
-        answer = message.content or "답변을 만들지 못했어요. 다시 한 번 말씀해 주세요."
+        answer = await shorten(message.content or "답변을 만들지 못했어요. 다시 한 번 말씀해 주세요.")
         if leaks_prompt(answer):
             log.warning("지시문 유출 의심 답변을 막음 user=%s", user_key[-12:])
             answer = SAFE_ANSWER
