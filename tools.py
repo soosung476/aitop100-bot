@@ -139,6 +139,16 @@ def add_business_days(base, count):
     return day
 
 
+def subtract_business_days(base, count):
+    # 컷오프 역산: 기준일 직전 영업일을 1로 세어 거꾸로 N번째 영업일의 24:00이 컷오프다
+    day = base
+    while count > 0:
+        day -= timedelta(days=1)
+        if is_business_day(day):
+            count -= 1
+    return day
+
+
 def date_info(args, user_key):
     try:
         target = date.fromisoformat(str(args.get("date", "")).strip())
@@ -164,6 +174,11 @@ def date_info(args, user_key):
     if business_days:
         due = add_business_days(target, int(business_days))
         result[f"date부터 영업일 {int(business_days)}일째(기한)"] = f"{due.isoformat()} ({WEEKDAYS[due.weekday()]}) 24:00"
+    # 정기배송 컷오프: 회차 결제일의 N영업일 전 24:00
+    days_before = args.get("business_days_before")
+    if days_before:
+        cutoff = subtract_business_days(target, int(days_before))
+        result[f"date의 {int(days_before)}영업일 전(컷오프)"] = f"{cutoff.isoformat()} ({WEEKDAYS[cutoff.weekday()]}) 24:00"
     # end_date를 주면 date부터 end_date까지 날짜마다 요일을 보여 준다 (가장 가까운 가능한 날을 찾을 때 쓴다)
     if end:
         if not 0 <= (end - target).days <= 31:
@@ -249,6 +264,7 @@ ALL_TOOLS = [
                     "base_date": {"type": "string", "description": "기준일 (YYYY-MM-DD). 비우면 오늘"},
                     "end_date": {"type": "string", "description": "기간의 마지막 날 (YYYY-MM-DD, 선택, 31일 이내)"},
                     "business_days": {"type": "integer", "description": "date부터 셀 영업일 수 (선택, 예: 3)"},
+                    "business_days_before": {"type": "integer", "description": "date(회차 결제일)에서 거꾸로 셀 영업일 수 (선택, 정기배송 컷오프 계산, 예: 3)"},
                 },
                 "required": ["date"],
             },

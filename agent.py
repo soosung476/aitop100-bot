@@ -40,7 +40,7 @@ llm = AsyncOpenAI(
     base_url=os.getenv("LLM_BASE_URL"),
     api_key=os.getenv("LLM_API_KEY") or "missing-key",
     timeout=float(os.getenv("LLM_TIMEOUT", "22")),
-    max_retries=0,
+    max_retries=1,
 )
 
 # 이 시간 안에 답이 없으면 같은 요청을 하나 더 보낸다
@@ -48,17 +48,29 @@ HEDGE_SECONDS = float(os.getenv("LLM_HEDGE_SECONDS", "8"))
 
 # Hive는 같은 키로 동시에 5개까지만 받아 준다(넘으면 429). 동시에 부르는 수를 제한해서 줄을 세운다
 # Semaphore: 동시에 들어갈 수 있는 자리 수를 정해 두는 문지기. 자리가 없으면 빌 때까지 기다린다
-llm_slots = asyncio.Semaphore(int(os.getenv("LLM_CONCURRENCY", "3")))
+llm_slots = asyncio.Semaphore(int(os.getenv("LLM_CONCURRENCY", "4")))
+MAX_INFLIGHT = 5
+inflight = 0
+
+
+async def counted_call(**kwargs):
+    # 지금 Hive로 나가 있는 요청 수를 센다 (같은 키로 동시 5개가 넘으면 429가 난다)
+    global inflight
+    inflight += 1
+    try:
+        return await llm.chat.completions.create(**kwargs)
+    finally:
+        inflight -= 1
 
 
 async def race_llm(**kwargs):
     # 응답이 가끔 튀는(수십 초) 경우가 있어서, HEDGE_SECONDS 안에 답이 없으면 같은 요청을 하나 더 보내
     # 먼저 도착한 답을 쓴다 (asyncio.wait: 정해 둔 시간까지 또는 하나가 끝날 때까지 기다린다)
-    tasks = {asyncio.create_task(llm.chat.completions.create(**kwargs))}
+    tasks = {asyncio.create_task(counted_call(**kwargs))}
     done, pending = await asyncio.wait(tasks, timeout=HEDGE_SECONDS)
-    if not done:
+    if not done and inflight < MAX_INFLIGHT:
         log.info("LLM 응답 지연 → 같은 요청을 하나 더 보냄")
-        pending.add(asyncio.create_task(llm.chat.completions.create(**kwargs)))
+        pending.add(asyncio.create_task(counted_call(**kwargs)))
     error = None
     while True:
         for task in done:
@@ -88,17 +100,35 @@ RESET_COMMANDS = {"/초기화", "/reset"}
 # 지시문이 새어 나가려 할 때 대신 보내는 답
 SAFE_ANSWER = "죄송하지만 그 내용은 안내해 드릴 수 없어요. 상담에 필요한 내용을 말씀해 주세요."
 
+# 대화가 길어져도 답변 형식을 잊지 않게 맨 끝에 붙이는 짧은 알림 (저장하지 않는다)
+FORMAT_REMINDER = {
+    "role": "system",
+    "content": (
+        "답변 전 점검: 고객에게 보내는 글은 말풍선 하나, 200자 이내, 많아도 280자. 한 문장씩 짧게 쓰고 고객이 묻지 않은 설명은 뺀다. "
+        "접수번호, 금액, 날짜, 기한, 다음 행동은 빠뜨리지 않는다. 아직 호출하지 않은 조회·접수가 남았으면 답하기 전에 먼저 호출한다."
+    ),
+}
+
 # 대화에서 케이스 ID(TC ID)를 찾는다
-# ① "- id: L-11"처럼 이름표가 붙은 줄 ② 이름표 없이 L-03, R-05-a 모양으로 쓴 값
-CASE_ID_PATTERNS = [
-    re.compile(r"(?im)^[\s\-\[]*(?:tc[\s_-]*id|test[\s_-]*case[\s_-]*id|x-aitop100-test-case-id|tc|id)\s*[:=]\s*([A-Za-z0-9][A-Za-z0-9_-]{1,30})"),
-    re.compile(r"(?<![A-Za-z0-9-])([A-Z]{1,2}-\d{2,3}(?:-[a-z])?)(?![A-Za-z0-9-])"),
-]
+# ① case metadata 묶음의 "- id: L-11" 줄 ② "TC ID: L-11"처럼 분명한 이름표 ③ 아직 케이스가 없을 때만 L-03 모양의 값
+# 고객의 "제 id: hong123", "B-12호" 같은 말을 케이스 ID로 오해하지 않게 ①③은 조건을 건다
+METADATA_ID_PATTERN = re.compile(r"(?im)^[\s\-\[]*id\s*[:=]\s*([A-Za-z0-9][A-Za-z0-9_-]{1,30})")
+LABELED_ID_PATTERN = re.compile(
+    r"(?im)^[\s\-\[]*(?:tc[\s_-]*id|test[\s_-]*case[\s_-]*id|x-aitop100-test-case-id|tc)\s*[:=]\s*([A-Za-z0-9][A-Za-z0-9_-]{1,30})"
+)
+BARE_ID_PATTERN = re.compile(r"(?<![A-Za-z0-9-])([A-Z]{1,2}-\d{2,3}(?:-[a-z])?)(?![A-Za-z0-9-])")
 
 
-def find_case_id(text):
-    for pattern in CASE_ID_PATTERNS:
-        match = pattern.search(text)
+def find_case_id(text, current=""):
+    if "case metadata" in text.lower() or "상담 인입" in text:
+        match = METADATA_ID_PATTERN.search(text)
+        if match:
+            return match.group(1)
+    match = LABELED_ID_PATTERN.search(text)
+    if match:
+        return match.group(1)
+    if not current:
+        match = BARE_ID_PATTERN.search(text)
         if match:
             return match.group(1)
     return ""
@@ -151,8 +181,9 @@ async def run_agent(user_key, text):
 
     # 케이스 ID가 바뀌면 다른 시나리오이므로 앞 대화를 지우고 새로 시작한다
     # 첫 메시지에는 "case metadata"가 붙어 오므로, 같은 케이스를 다시 시험해도 새 대화로 시작한다
-    case_id = find_case_id(text)
-    if case_id and (case_id != memory.get_case(user_key) or "case metadata" in text.lower()):
+    current_case = memory.get_case(user_key)
+    case_id = find_case_id(text, current_case)
+    if case_id and (case_id != current_case or "case metadata" in text.lower()):
         memory.clear_history(user_key)
         memory.set_case(user_key, case_id)
         log.info("새 케이스 %s user=%s", case_id, user_key[-12:])
@@ -167,7 +198,7 @@ async def run_agent(user_key, text):
         started = time.time()
         response = await ask_llm(
             model=LLM_MODEL,
-            messages=[system] + history,
+            messages=[system] + history + [FORMAT_REMINDER],
             tools=tools.TOOLS,
             max_tokens=LLM_MAX_TOKENS,
             **({"extra_body": LLM_EXTRA_BODY} if LLM_EXTRA_BODY else {}),

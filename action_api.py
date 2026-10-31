@@ -33,7 +33,12 @@ def enabled():
 
 
 def send(method, url, query, body, headers):
-    response = client.request(method, url, params=query or None, json=body, headers=headers)
+    try:
+        response = client.request(method, url, params=query or None, json=body, headers=headers)
+    except httpx.TransportError as e:
+        # 재사용하던 연결이 끊긴 경우가 있어 한 번 더 보낸다 (접수 API는 다시 보내도 같은 접수번호가 돌아온다)
+        log.warning("액션 서버 연결 재시도: %s", e.__class__.__name__)
+        response = client.request(method, url, params=query or None, json=body, headers=headers)
     if response.status_code in RETRY_STATUS:
         wait = min(float(response.headers.get("Retry-After", "1") or 1), MAX_RETRY_WAIT)
         log.warning("액션 서버 %d → %.0f초 뒤 다시 시도", response.status_code, wait)
@@ -80,6 +85,9 @@ def call(method, path, user_key, query=None, body=None, case_id=""):
     except ValueError:
         data = response.text[:2000]
     result = {"상태코드": response.status_code, "응답": data}
+    # 목록 검색 뒤에는 대상 주문을 단건으로 조회해야 금액·결제 정보를 정확히 쓸 수 있다
+    if path == "/api/orders" and response.status_code == 200:
+        result["안내"] = "대상 주문을 특정했으면 /api/orders/{order_no}로 그 주문을 조회한 뒤 처리한다."
     if response.status_code == 404:
         result["안내"] = "해당 대상이 없습니다(또는 경로가 틀렸습니다)."
     elif response.status_code == 400 and not data:
