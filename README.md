@@ -24,8 +24,8 @@
 | `docs/리허설.md` | 리허설 절차 (`scripts/rehearsal.sh on/off`) | 리허설용 |
 | `CLAUDE.md` | 이 폴더에서 Claude Code를 시작하면 자동으로 읽는 안내 | — |
 
-지금 `prompts/`와 `data/`에 들어 있는 것은 연습 문제 4번(두 마을 공동 주문 상담)이다.
-`data/재고표.csv`의 생굴 비고란에는 일부러 숨은 지시(간접 인젝션)를 넣어 두었다.
+지금 `prompts/`와 `data/`에 들어 있는 것은 대회 본 문제(교동마을 산지직송 고객 상담)의 지시문과 규정 문서다.
+`prompts/상황규칙.md`는 고객 말에 맞는 처리 절차를 답변 직전에 넣어 주는 규칙이고(`## 정규식` + 절차), `media.py`는 사진·음성을 글로 바꾸며, `reference/영업일달력.csv`는 날짜 도구가 읽는다.
 
 ## 자동으로 해 주는 것
 
@@ -50,7 +50,7 @@
 3. API 문서를 `data/액션서버_API.md`로 저장한다 (예시: `examples/action_server/data/액션서버_API.md`)
 4. `prompts/system.md`를 문제에 맞게 고친다 (예시: `examples/action_server/system.md`)
 5. `./deploy.sh` → `chat_test.py`로 몇 번 대화해 보기 → 카카오톡에서 확인
-6. ⚠️ 운영진 액션 서버에 자동 시험(`simulate.py`)을 여러 번 돌리지 않는다 ('자동화 대량 요청'은 부정행위)
+6. 공개 TC 자동 시험은 `scripts/tc_eval.py`로 한다 (연습 호출 60초당 100번, 누적 한도 없음)
 7. 제출하기 전에 최종 배포와 카톡 확인을 끝낸다. **제출 뒤에는 배포·재시작·.env 수정 금지**
 
 ## 자주 쓰는 명령어 (맥 터미널)

@@ -44,7 +44,7 @@ llm = AsyncOpenAI(
 )
 
 # 이 시간 안에 답이 없으면 같은 요청을 하나 더 보낸다
-HEDGE_SECONDS = float(os.getenv("LLM_HEDGE_SECONDS", "8"))
+HEDGE_SECONDS = float(os.getenv("LLM_HEDGE_SECONDS", "6"))
 
 # Hive는 같은 키로 동시에 5개까지만 받아 준다(넘으면 429). 동시에 부르는 수를 제한해서 줄을 세운다
 # Semaphore: 동시에 들어갈 수 있는 자리 수를 정해 두는 문지기. 자리가 없으면 빌 때까지 기다린다
