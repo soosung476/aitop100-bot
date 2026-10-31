@@ -140,6 +140,9 @@ async def run_tc(tc_id, slots):
             bubbles.extend(parts)
             transcript.append(("상담원", answer))
             text = await customer_say(tc, orders, transcript)
+            # 가상 고객이 첫 답에서 바로 나가 버리면 시험이 안 되므로 한 번 더 말하게 한다
+            if "###종료###" in text and turn == 0:
+                text = await customer_say(tc, orders, transcript + [("고객", "(아직 상담이 끝나지 않았다. 상담원 질문에 답한다)")])
             if "###종료###" in text:
                 break
         calls = calls_by_user[user]
